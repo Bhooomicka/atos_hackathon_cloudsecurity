@@ -5,6 +5,7 @@ Sentinel is a security operations dashboard with role-based views, alert monitor
 ## Current Project State
 
 - Frontend is fully usable in frontend-only mode (no backend required).
+- Backend now includes testable JIT privileged access, sales-safe operations settings, maintenance-window aware permission changes, offboarding updates, and credential rotation flows.
 - Sidebar navigation is split into dedicated pages:
   - Dashboard
   - Users & Accounts
@@ -79,30 +80,108 @@ If you want live API data instead of mock fallback:
 1) Create and activate virtual environment
 
 	cd backend
-	python3 -m venv venv
-	source venv/bin/activate
+	python3 -m venv .venv
+	source .venv/bin/activate
 
 2) Install requirements
 
 	pip install -r requirements.txt
 
-3) Run API
+3) Create backend env file
+
+	Create backend/.env with:
+
+	MONGO_URL=mongodb://localhost:27017
+	DB_NAME=sentinel_dashboard
+	JWT_SECRET=your-local-jwt-secret
+	CORS_ORIGINS=http://localhost:3000
+	EMAIL_FROM=alerts@sentinel-dashboard.com
+
+	Notes:
+	- MongoDB is required for live backend mode.
+	- RESEND_API_KEY is optional. Without it, emails are mocked and stored in MongoDB.
+	- The database does not need to be created manually; the app seeds data on startup.
+
+4) Run API
 
 	uvicorn server:app --reload --port 8000
 
-Note: backend requires environment variables and MongoDB configuration to function end-to-end.
+5) Create frontend env file
+
+	Create frontend/.env with:
+
+	REACT_APP_BACKEND_URL=http://localhost:8000
 
 ## Key Frontend Behavior
 
 - If backend calls fail, dashboard and auth use local fallback data so the UI stays interactive.
 - Theme preference and notification preferences are persisted in localStorage.
 - Access Hygiene "Overprivileged Accounts" click works in fallback mode and opens the permission flow modal.
+- Dashboard includes live test surfaces for:
+  - JIT privileged access request/approval/revocation
+  - Sales-safe operations settings
+  - Maintenance-window permission changes
+  - Offboarding updates
+  - Credential rotation
+
+## New Backend + UI Flows Added
+
+- JIT Privileged Access
+  - Admins and team leads can create requests that become active immediately.
+  - Team members submit pending requests for approval.
+  - Active requests can be revoked and also expire automatically.
+
+- Sales-Safe Operations
+  - Admins can toggle safe mode and peak-season mode.
+  - Maintenance windows can be configured from the dashboard.
+  - Permission changes can be applied immediately or queued for a maintenance window.
+
+- Access Hygiene
+  - Permission change modal now supports `auto`, `immediate`, and `maintenance_window` apply modes.
+
+- Existing Dashboard Workflows Wired to Backend
+  - Offboarding detail actions persist to MongoDB.
+  - Credential rotation actions persist to MongoDB.
+  - Outgoing webhook hooks were added for key events.
+
+## Recommended Manual Test Flow
+
+1) Log in as admin
+
+	Email: bhooomickadg@gmail.com
+	Password: 12345
+
+2) JIT Access panel
+
+	- Create a request
+	- Confirm it becomes `active` immediately
+	- Revoke it and confirm status changes
+
+3) Sales-Safe Operations panel
+
+	- Toggle `Safe Mode`
+	- Toggle `Peak Season Active`
+	- Save settings
+
+4) Access Hygiene
+
+	- Open the permission modal from an overprivileged account
+	- Select `Maintenance Window`
+	- Submit the permission change
+	- Confirm the request succeeds and queues when outside a window
+
+5) Offboarding / Credentials
+
+	- Open detail modals
+	- Trigger actions
+	- Confirm the dashboard refreshes with updated values
 
 ## Troubleshooting
 
 1) Dependency resolution errors during npm install
 
-- Use npm install --legacy-peer-deps
+- This repo pins `date-fns` to a version compatible with `react-day-picker`.
+- If you still hit a local npm cache issue, delete `node_modules` and rerun `npm install`.
 
 2) Missing module error for ajv/dist/compile/codegen
 

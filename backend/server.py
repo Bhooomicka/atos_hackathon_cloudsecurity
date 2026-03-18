@@ -94,6 +94,7 @@ class PermissionChangeRequest(BaseModel):
     new_permissions: List[str]
     reason: str
     requested_by: Optional[str] = None
+    apply_mode: str = "auto"  # auto, immediate, maintenance_window
 
 class IAMSyncRequest(BaseModel):
     provider: str  # okta, azure_ad, aws_iam, gcp_iam
@@ -106,6 +107,27 @@ class WebhookConfig(BaseModel):
     events: List[str]  # alert_created, alert_escalated, access_revoked, credential_rotated
     secret: Optional[str] = None
     active: bool = True
+
+class MaintenanceWindow(BaseModel):
+    day_of_week: int = Field(ge=0, le=6)  # Monday=0
+    start_hour: int = Field(ge=0, le=23)
+    end_hour: int = Field(ge=0, le=23)
+
+class OperationsConfig(BaseModel):
+    safe_mode_enabled: bool = False
+    peak_season_active: bool = False
+    maintenance_windows: List[MaintenanceWindow] = Field(default_factory=list)
+
+class JITAccessRequest(BaseModel):
+    account_id: str
+    account_type: str  # user, service_account
+    access_level: str
+    resource_scope: List[str] = Field(default_factory=list)
+    justification: str
+    duration_minutes: int = Field(default=60, ge=15, le=480)
+
+class JITAccessDecision(BaseModel):
+    notes: Optional[str] = None
 
 # Email Service (Mocked - ready for Resend integration)
 class EmailService:
@@ -267,6 +289,8 @@ class EscalationService:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "details": f"High severity alert '{alert['title']}' escalated after {ESCALATION_HOURS} hour(s) without response"
             })
+
+            await trigger_outgoing_webhooks("alert_escalated", alert)
             
             logging.info(f"Escalated alert: {alert['id']} - {alert['title']}")
 
@@ -279,6 +303,70 @@ async def escalation_checker():
         except Exception as e:
             logging.error(f"Escalation check failed: {e}")
         await asyncio.sleep(300)  # Check every 5 minutes
+
+async def permission_change_queue_worker():
+    """Apply queued permission changes when a maintenance window opens."""
+    while True:
+        try:
+            operations_config = await get_operations_config()
+            now = datetime.now(timezone.utc)
+            if is_within_maintenance_window(now, operations_config):
+                queued_changes = await db.permission_changes.find({
+                    "queued_for_window": True,
+                    "applied": False,
+                    "status": "approved"
+                }, {"_id": 0}).to_list(100)
+
+                for change in queued_changes:
+                    await db.permission_changes.update_one(
+                        {"id": change["id"]},
+                        {"$set": {
+                            "applied": True,
+                            "applied_at": now.isoformat(),
+                            "queued_for_window": False,
+                            "queue_reason": None
+                        }}
+                    )
+                    await db.access_hygiene.delete_one({"account_name": change["account_id"], "type": "overprivileged"})
+                    await trigger_outgoing_webhooks("permission_change_applied", change)
+        except Exception as e:
+            logging.error(f"Permission queue worker failed: {e}")
+        await asyncio.sleep(300)
+
+async def jit_access_expiry_worker():
+    """Auto-revoke expired JIT privileged access grants."""
+    while True:
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            expired_grants = await db.jit_access_requests.find({
+                "status": "active",
+                "expires_at": {"$lte": now}
+            }, {"_id": 0}).to_list(100)
+
+            for grant in expired_grants:
+                await db.jit_access_requests.update_one(
+                    {"id": grant["id"]},
+                    {"$set": {
+                        "status": "expired",
+                        "revoked_at": datetime.now(timezone.utc).isoformat(),
+                        "revoked_by": "system",
+                        "revoke_reason": "Access duration expired"
+                    }}
+                )
+                await db.activity_log.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "action": "JIT Access Expired",
+                    "item_type": "jit_access",
+                    "item_id": grant["id"],
+                    "user_id": "system",
+                    "user_name": "System",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "details": f"Auto-revoked privileged access for {grant['account_id']}"
+                })
+                await trigger_outgoing_webhooks("jit_access_expired", grant)
+        except Exception as e:
+            logging.error(f"JIT expiry worker failed: {e}")
+        await asyncio.sleep(60)
 
 # Helper functions
 def hash_password(password: str) -> str:
@@ -310,6 +398,82 @@ def get_time_greeting():
         return "Good Afternoon"
     else:
         return "Good Evening"
+
+async def get_operations_config() -> dict:
+    config = await db.system_settings.find_one({"key": "operations"}, {"_id": 0})
+    if config:
+        return config["value"]
+    return {
+        "safe_mode_enabled": False,
+        "peak_season_active": False,
+        "maintenance_windows": []
+    }
+
+def is_within_maintenance_window(now: datetime, config: dict) -> bool:
+    for window in config.get("maintenance_windows", []):
+        if window.get("day_of_week") != now.weekday():
+            continue
+        start_hour = window.get("start_hour", 0)
+        end_hour = window.get("end_hour", 0)
+        current_hour = now.hour
+
+        if start_hour <= end_hour:
+            if start_hour <= current_hour < end_hour:
+                return True
+        else:
+            if current_hour >= start_hour or current_hour < end_hour:
+                return True
+    return False
+
+async def queue_or_apply_permission_change(change_id: str, reason: str = "approved"):
+    change = await db.permission_changes.find_one({"id": change_id}, {"_id": 0})
+    if not change:
+        return None
+
+    operations_config = await get_operations_config()
+    now = datetime.now(timezone.utc)
+    safe_mode_active = operations_config.get("safe_mode_enabled") and operations_config.get("peak_season_active")
+    within_window = is_within_maintenance_window(now, operations_config)
+    apply_mode = change.get("apply_mode", "auto")
+
+    update_data = {
+        "status": "approved",
+        "queue_reason": None,
+        "approved_at": now.isoformat()
+    }
+
+    should_queue = False
+    queue_reason = "Queued by sales-safe mode until the next maintenance window"
+
+    if apply_mode == "maintenance_window":
+        should_queue = not within_window
+        queue_reason = "Queued until the next maintenance window"
+    elif apply_mode == "immediate":
+        should_queue = False
+    else:
+        should_queue = safe_mode_active and not within_window
+
+    if should_queue:
+        update_data.update({
+            "applied": False,
+            "queued_for_window": True,
+            "queued_at": now.isoformat(),
+            "queue_reason": queue_reason
+        })
+    else:
+        update_data.update({
+            "applied": True,
+            "applied_at": now.isoformat(),
+            "queued_for_window": False
+        })
+
+    await db.permission_changes.update_one({"id": change_id}, {"$set": update_data})
+
+    updated = await db.permission_changes.find_one({"id": change_id}, {"_id": 0})
+    if updated and updated.get("applied"):
+        await db.access_hygiene.delete_one({"account_name": updated["account_id"], "type": "overprivileged"})
+
+    return updated
 
 # Sample Team Data
 TEAM_USERS = [
@@ -435,6 +599,20 @@ async def init_data():
             {"id": "act-003", "action": "Credential Rotated", "item_type": "credential", "item_id": "cred-006", "user_id": "user-member-002", "user_name": "Emily Chen", "timestamp": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), "details": "Rotated GitHub API key ahead of schedule"},
         ]
         await db.activity_log.insert_many(activities)
+
+    operations_settings = await db.system_settings.find_one({"key": "operations"}, {"_id": 0})
+    if not operations_settings:
+        await db.system_settings.insert_one({
+            "key": "operations",
+            "value": {
+                "safe_mode_enabled": True,
+                "peak_season_active": False,
+                "maintenance_windows": [
+                    {"day_of_week": 1, "start_hour": 2, "end_hour": 4},
+                    {"day_of_week": 3, "start_hour": 2, "end_hour": 4}
+                ]
+            }
+        })
 
 async def send_alert_notification(alert: dict):
     """Send email notification for a new alert"""
@@ -654,6 +832,7 @@ async def update_offboarding(record_id: str, request: UpdateOffboardingRequest, 
     }
     
     await db.offboarding.update_one({"id": record_id}, {"$set": update_data})
+    updated_record = await db.offboarding.find_one({"id": record_id}, {"_id": 0})
     
     await db.activity_log.insert_one({
         "id": str(uuid.uuid4()),
@@ -665,6 +844,9 @@ async def update_offboarding(record_id: str, request: UpdateOffboardingRequest, 
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "details": f"Revoked access for {record['name']} in {request.revoke_time_seconds or 0} seconds"
     })
+
+    if updated_record and updated_record.get("access_revoked"):
+        await trigger_outgoing_webhooks("access_revoked", updated_record)
     
     return {"success": True}
 
@@ -728,6 +910,9 @@ async def update_credential(cred_id: str, request: UpdateCredentialRequest, payl
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "details": f"Rotated credential '{cred['name']}'"
         })
+
+        updated_cred = await db.credentials.find_one({"id": cred_id}, {"_id": 0})
+        await trigger_outgoing_webhooks("credential_rotated", updated_cred)
     
     return {"success": True}
 
@@ -787,6 +972,164 @@ async def update_notification_settings(prefs: NotificationPreferences, payload: 
     )
     return {"success": True}
 
+@api_router.get("/settings/operations")
+async def get_operations_settings(payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return await get_operations_config()
+
+@api_router.put("/settings/operations")
+async def update_operations_settings(config: OperationsConfig, payload: dict = Depends(verify_token)):
+    if payload["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    config_payload = {
+        "safe_mode_enabled": config.safe_mode_enabled,
+        "peak_season_active": config.peak_season_active,
+        "maintenance_windows": [window.model_dump() for window in config.maintenance_windows]
+    }
+    await db.system_settings.update_one(
+        {"key": "operations"},
+        {"$set": {"value": config_payload, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True
+    )
+    return {"success": True, "config": config_payload}
+
+# =============================================================================
+# JIT PRIVILEGED ACCESS - Request, Approve, Auto-Expire
+# =============================================================================
+
+@api_router.post("/jit-access/requests")
+async def create_jit_access_request(request: JITAccessRequest, payload: dict = Depends(verify_token)):
+    jit_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    auto_activate = payload["role"] in ["admin", "team_lead"]
+    expires_at = (now + timedelta(minutes=request.duration_minutes)).isoformat() if auto_activate else None
+
+    record = {
+        "id": jit_id,
+        "account_id": request.account_id,
+        "account_type": request.account_type,
+        "access_level": request.access_level,
+        "resource_scope": request.resource_scope,
+        "justification": request.justification,
+        "duration_minutes": request.duration_minutes,
+        "requested_by": payload["user_id"],
+        "status": "active" if auto_activate else "pending",
+        "approved_by": payload["user_id"] if auto_activate else None,
+        "requested_at": now.isoformat(),
+        "approved_at": now.isoformat() if auto_activate else None,
+        "expires_at": expires_at
+    }
+    await db.jit_access_requests.insert_one(record)
+
+    user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
+    await db.activity_log.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "JIT Access Requested" if not auto_activate else "JIT Access Granted",
+        "item_type": "jit_access",
+        "item_id": jit_id,
+        "user_id": payload["user_id"],
+        "user_name": user["name"] if user else "Unknown",
+        "timestamp": now.isoformat(),
+        "details": f"{request.account_id} requested {request.access_level} access for {request.duration_minutes} minute(s)"
+    })
+
+    await trigger_outgoing_webhooks("jit_access_requested", record)
+    return {"success": True, "request_id": jit_id, "status": record["status"], "expires_at": expires_at}
+
+@api_router.get("/jit-access/requests")
+async def list_jit_access_requests(payload: dict = Depends(verify_token)):
+    query = {} if payload["role"] in ["admin", "team_lead"] else {"requested_by": payload["user_id"]}
+    records = await db.jit_access_requests.find(query, {"_id": 0}).sort("requested_at", -1).to_list(100)
+    return records
+
+@api_router.put("/jit-access/{request_id}/approve")
+async def approve_jit_access_request(request_id: str, decision: JITAccessDecision, payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    record = await db.jit_access_requests.find_one({"id": request_id}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="JIT access request not found")
+    if record["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Only pending requests can be approved")
+
+    now = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(minutes=record["duration_minutes"])).isoformat()
+    await db.jit_access_requests.update_one(
+        {"id": request_id},
+        {"$set": {
+            "status": "active",
+            "approved_by": payload["user_id"],
+            "approved_at": now.isoformat(),
+            "approval_notes": decision.notes,
+            "expires_at": expires_at
+        }}
+    )
+
+    approver = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
+    await db.activity_log.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "JIT Access Approved",
+        "item_type": "jit_access",
+        "item_id": request_id,
+        "user_id": payload["user_id"],
+        "user_name": approver["name"] if approver else "Unknown",
+        "timestamp": now.isoformat(),
+        "details": f"Approved privileged access for {record['account_id']} until {expires_at}"
+    })
+
+    updated = await db.jit_access_requests.find_one({"id": request_id}, {"_id": 0})
+    await trigger_outgoing_webhooks("jit_access_approved", updated)
+    return {"success": True, "status": "active", "expires_at": expires_at}
+
+@api_router.put("/jit-access/{request_id}/reject")
+async def reject_jit_access_request(request_id: str, decision: JITAccessDecision, payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    record = await db.jit_access_requests.find_one({"id": request_id}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="JIT access request not found")
+
+    await db.jit_access_requests.update_one(
+        {"id": request_id},
+        {"$set": {
+            "status": "rejected",
+            "rejected_by": payload["user_id"],
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+            "rejection_notes": decision.notes
+        }}
+    )
+    updated = await db.jit_access_requests.find_one({"id": request_id}, {"_id": 0})
+    await trigger_outgoing_webhooks("jit_access_rejected", updated)
+    return {"success": True, "status": "rejected"}
+
+@api_router.put("/jit-access/{request_id}/revoke")
+async def revoke_jit_access_request(request_id: str, decision: JITAccessDecision, payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    record = await db.jit_access_requests.find_one({"id": request_id}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="JIT access request not found")
+    if record["status"] not in ["active", "pending"]:
+        raise HTTPException(status_code=400, detail="Only pending or active requests can be revoked")
+
+    await db.jit_access_requests.update_one(
+        {"id": request_id},
+        {"$set": {
+            "status": "revoked",
+            "revoked_by": payload["user_id"],
+            "revoked_at": datetime.now(timezone.utc).isoformat(),
+            "revoke_reason": decision.notes or "Manually revoked"
+        }}
+    )
+    updated = await db.jit_access_requests.find_one({"id": request_id}, {"_id": 0})
+    await trigger_outgoing_webhooks("jit_access_revoked", updated)
+    return {"success": True, "status": "revoked"}
+
 # =============================================================================
 # DEVOPS WEBHOOK APIs - For CI/CD and External System Integration
 # =============================================================================
@@ -843,6 +1186,7 @@ async def receive_webhook(event: WebhookEvent):
         }
         await db.alerts.insert_one(alert)
         await send_alert_notification(alert)
+        await trigger_outgoing_webhooks("alert_created", alert)
     
     elif event.event_type == "access_change":
         # Log access changes from IAM systems
@@ -1055,25 +1399,22 @@ async def create_permission_change(request: PermissionChangeRequest, payload: di
         "current_permissions": request.current_permissions,
         "new_permissions": request.new_permissions,
         "reason": request.reason,
+        "apply_mode": request.apply_mode,
         "requested_by": payload["user_id"],
         "status": "pending" if payload["role"] == "team_member" else "approved",
         "approved_by": payload["user_id"] if payload["role"] != "team_member" else None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "applied": False
+        "approved_at": datetime.now(timezone.utc).isoformat() if payload["role"] != "team_member" else None,
+        "applied": False,
+        "queued_for_window": False,
+        "queue_reason": None
     }
     
     await db.permission_changes.insert_one(change_record)
     
     # Auto-apply if requested by admin/team_lead
     if payload["role"] in ["admin", "team_lead"]:
-        # In production: Call IAM API to apply changes
-        await db.permission_changes.update_one(
-            {"id": change_id},
-            {"$set": {"applied": True, "applied_at": datetime.now(timezone.utc).isoformat()}}
-        )
-        
-        # Update access_hygiene if this resolves an overprivileged account
-        await db.access_hygiene.delete_one({"account_name": request.account_id, "type": "overprivileged"})
+        await queue_or_apply_permission_change(change_id, reason="self-approved")
     
     # Log activity
     user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
@@ -1087,12 +1428,17 @@ async def create_permission_change(request: PermissionChangeRequest, payload: di
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "details": f"Permission change for {request.account_id}: {len(request.current_permissions)} -> {len(request.new_permissions)} permissions"
     })
+
+    updated_change = await db.permission_changes.find_one({"id": change_id}, {"_id": 0})
+    await trigger_outgoing_webhooks("permission_change_requested", updated_change)
     
     return {
         "success": True,
         "change_id": change_id,
         "status": change_record["status"],
-        "applied": change_record["applied"] if payload["role"] != "team_member" else False
+        "applied": updated_change["applied"] if updated_change else False,
+        "queued_for_window": updated_change.get("queued_for_window", False) if updated_change else False,
+        "queue_reason": updated_change.get("queue_reason") if updated_change else None
     }
 
 @api_router.get("/permissions/pending")
@@ -1115,13 +1461,9 @@ async def approve_permission_change(change_id: str, payload: dict = Depends(veri
     
     await db.permission_changes.update_one(
         {"id": change_id},
-        {"$set": {
-            "status": "approved",
-            "approved_by": payload["user_id"],
-            "applied": True,
-            "applied_at": datetime.now(timezone.utc).isoformat()
-        }}
+        {"$set": {"approved_by": payload["user_id"]}}
     )
+    updated_change = await queue_or_apply_permission_change(change_id, reason="approved")
     
     # Log activity
     user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
@@ -1135,7 +1477,10 @@ async def approve_permission_change(change_id: str, payload: dict = Depends(veri
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "details": f"Approved permission change for {change['account_id']}"
     })
-    
+
+    await trigger_outgoing_webhooks("permission_change_approved", updated_change)
+    if updated_change and updated_change.get("queued_for_window"):
+        return {"success": True, "message": "Permission change approved and queued for the next maintenance window"}
     return {"success": True, "message": "Permission change approved and applied"}
 
 @api_router.put("/permissions/{change_id}/reject")
@@ -1146,9 +1491,14 @@ async def reject_permission_change(change_id: str, payload: dict = Depends(verif
     
     await db.permission_changes.update_one(
         {"id": change_id},
-        {"$set": {"status": "rejected", "rejected_by": payload["user_id"]}}
+        {"$set": {
+            "status": "rejected",
+            "rejected_by": payload["user_id"],
+            "rejected_at": datetime.now(timezone.utc).isoformat()
+        }}
     )
-    
+    rejected = await db.permission_changes.find_one({"id": change_id}, {"_id": 0})
+    await trigger_outgoing_webhooks("permission_change_rejected", rejected)
     return {"success": True, "message": "Permission change rejected"}
 
 # =============================================================================
@@ -1259,6 +1609,8 @@ async def startup_event():
     await init_data()
     # Start escalation checker in background
     asyncio.create_task(escalation_checker())
+    asyncio.create_task(permission_change_queue_worker())
+    asyncio.create_task(jit_access_expiry_worker())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

@@ -7,12 +7,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { 
-  Shield, Plus, Minus, Check, X, AlertTriangle, 
-  ChevronRight, User, Server, Clock
-} from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Shield, Plus, Check, X, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
 const PermissionModal = ({ open, onClose, hygieneItem, onSuccess }) => {
@@ -22,6 +19,7 @@ const PermissionModal = ({ open, onClose, hygieneItem, onSuccess }) => {
   const [reason, setReason] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [newPermInput, setNewPermInput] = useState("");
+  const [applyMode, setApplyMode] = useState("auto");
 
   const authHeaders = { headers: { Authorization: `Bearer ${token}` } };
 
@@ -29,6 +27,8 @@ const PermissionModal = ({ open, onClose, hygieneItem, onSuccess }) => {
     if (hygieneItem?.details) {
       setCurrentPerms(hygieneItem.details.current_permissions || []);
       setNewPerms(hygieneItem.details.recommended_permissions || []);
+      setReason("");
+      setApplyMode("auto");
     }
   }, [hygieneItem]);
 
@@ -51,16 +51,23 @@ const PermissionModal = ({ open, onClose, hygieneItem, onSuccess }) => {
 
     setIsLoading(true);
     try {
-      await axios.post(`${API}/permissions/change-request`, {
+      const response = await axios.post(`${API}/permissions/change-request`, {
         account_id: hygieneItem.account_name,
         account_type: hygieneItem.account_type.toLowerCase().replace(" ", "_"),
         current_permissions: currentPerms,
         new_permissions: newPerms,
-        reason: reason
+        reason: reason,
+        apply_mode: applyMode
       }, authHeaders);
 
-      toast.success("Permission change applied", {
-        description: "Access has been updated successfully"
+      const successDescription = response.data?.queued_for_window
+        ? response.data.queue_reason || "Change approved and queued for the next maintenance window"
+        : isAdmin
+          ? "Access has been updated successfully"
+          : "Request submitted for lead/admin approval";
+
+      toast.success(isAdmin ? "Permission change processed" : "Permission change submitted", {
+        description: successDescription
       });
       onSuccess?.();
       onClose();
@@ -173,6 +180,23 @@ const PermissionModal = ({ open, onClose, hygieneItem, onSuccess }) => {
               onChange={(e) => setReason(e.target.value)}
               className="min-h-[80px]"
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label>Apply Mode</Label>
+            <Select value={applyMode} onValueChange={setApplyMode}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto</SelectItem>
+                <SelectItem value="immediate">Immediate</SelectItem>
+                <SelectItem value="maintenance_window">Maintenance Window</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Use maintenance window mode to test the backend queueing flow you just added.
+            </p>
           </div>
 
           {/* Risk Score */}

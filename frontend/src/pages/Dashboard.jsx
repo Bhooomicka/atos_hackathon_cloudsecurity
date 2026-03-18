@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth, useTheme, API } from "@/App";
+import { useAuth, API } from "@/App";
 import axios from "axios";
 import Sidebar from "@/components/dashboard/Sidebar";
 import Header from "@/components/dashboard/Header";
@@ -8,11 +8,12 @@ import MetricsGrid from "@/components/dashboard/MetricsGrid";
 import AccessHygiene from "@/components/dashboard/AccessHygiene";
 import OffboardingTracker from "@/components/dashboard/OffboardingTracker";
 import DetailModal from "@/components/dashboard/DetailModal";
+import JITAccessPanel from "@/components/dashboard/JITAccessPanel";
+import OperationsPanel from "@/components/dashboard/OperationsPanel";
 
 const Dashboard = () => {
   const navigate = useNavigate();
   const { token, user } = useAuth();
-  const { theme } = useTheme();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeSection, setActiveSection] = useState("Dashboard");
   const [greeting, setGreeting] = useState("");
@@ -384,6 +385,15 @@ const Dashboard = () => {
               </h2>
               <MetricsGrid metrics={dashboardData.metrics} isPersonalView={isPersonalView} />
             </section>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <section className="animate-fade-in stagger-2" data-testid="jit-access-section">
+                <JITAccessPanel />
+              </section>
+              <section className="animate-fade-in stagger-3" data-testid="operations-section">
+                <OperationsPanel />
+              </section>
+            </div>
 
             {/* Access Hygiene & Offboarding */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
