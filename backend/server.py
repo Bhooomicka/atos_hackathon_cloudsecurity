@@ -13,6 +13,9 @@ from datetime import datetime, timezone, timedelta
 import jwt
 import hashlib
 import asyncio
+import math
+import statistics
+from sklearn.ensemble import IsolationForest
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -128,6 +131,16 @@ class JITAccessRequest(BaseModel):
 
 class JITAccessDecision(BaseModel):
     notes: Optional[str] = None
+
+class BehaviorEventRequest(BaseModel):
+    account_id: str
+    account_type: str  # user, service_account
+    event_type: str = "api_activity"
+    timestamp: Optional[str] = None
+    location: str
+    api_calls: int = Field(default=1, ge=0)
+    resource: str
+    metadata: dict = Field(default_factory=dict)
 
 # Email Service (Mocked - ready for Resend integration)
 class EmailService:
@@ -425,6 +438,219 @@ def is_within_maintenance_window(now: datetime, config: dict) -> bool:
                 return True
     return False
 
+def strip_mongo_ids(value):
+    if isinstance(value, dict):
+        return {
+            key: strip_mongo_ids(item)
+            for key, item in value.items()
+            if key != "_id"
+        }
+    if isinstance(value, list):
+        return [strip_mongo_ids(item) for item in value]
+    return value
+
+BASELINE_MIN_EVENTS = 8
+ISOLATION_FOREST_SEED = 42
+
+def parse_behavior_timestamp(value: Optional[str]) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return datetime.now(timezone.utc)
+
+def encode_event_features(event: dict, profile: Optional[dict] = None) -> List[float]:
+    timestamp = parse_behavior_timestamp(event.get("timestamp"))
+    hour = float(timestamp.hour)
+    weekday = float(timestamp.weekday())
+    api_calls = float(event.get("api_calls", 0))
+
+    if profile:
+        location_map = profile.get("location_map", {})
+        resource_map = profile.get("resource_map", {})
+    else:
+        location_map = {}
+        resource_map = {}
+
+    location_id = float(location_map.get(event.get("location"), -1))
+    resource_id = float(resource_map.get(event.get("resource"), -1))
+
+    return [hour, weekday, api_calls, location_id, resource_id]
+
+def build_baseline_profile(account_id: str, account_type: str, events: List[dict]) -> dict:
+    sorted_events = sorted(events, key=lambda item: item["timestamp"])
+    unique_locations = sorted({event.get("location", "unknown") for event in sorted_events})
+    unique_resources = sorted({event.get("resource", "unknown") for event in sorted_events})
+    location_map = {location: index for index, location in enumerate(unique_locations)}
+    resource_map = {resource: index for index, resource in enumerate(unique_resources)}
+
+    profile = {
+        "account_id": account_id,
+        "account_type": account_type,
+        "event_count": len(sorted_events),
+        "usual_hours": sorted({parse_behavior_timestamp(event["timestamp"]).hour for event in sorted_events}),
+        "usual_locations": unique_locations[:5],
+        "usual_resources": unique_resources[:8],
+        "avg_api_calls": round(statistics.mean(event.get("api_calls", 0) for event in sorted_events), 2),
+        "std_api_calls": round(statistics.pstdev(event.get("api_calls", 0) for event in sorted_events), 2) if len(sorted_events) > 1 else 0.0,
+        "location_map": location_map,
+        "resource_map": resource_map,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    if len(sorted_events) >= BASELINE_MIN_EVENTS:
+        feature_matrix = [encode_event_features(event, profile) for event in sorted_events]
+        model = IsolationForest(
+            contamination=0.2,
+            random_state=ISOLATION_FOREST_SEED,
+            n_estimators=100
+        )
+        model.fit(feature_matrix)
+        profile["model_state"] = {
+            "offset": float(model.offset_),
+            "estimators": len(model.estimators_)
+        }
+
+    return profile
+
+async def recompute_behavioral_baselines() -> dict:
+    events = await db.behavior_events.find({}, {"_id": 0}).to_list(10000)
+    grouped = {}
+    for event in events:
+        grouped.setdefault(event["account_id"], []).append(event)
+
+    profiles_built = 0
+    for account_id, account_events in grouped.items():
+        profile = build_baseline_profile(account_id, account_events[0]["account_type"], account_events)
+        await db.behavior_profiles.update_one(
+            {"account_id": account_id},
+            {"$set": profile},
+            upsert=True
+        )
+        profiles_built += 1
+
+    return {"profiles_built": profiles_built, "event_count": len(events)}
+
+def score_behavior_event(event: dict, profile: Optional[dict], events: List[dict]) -> dict:
+    if not profile or len(events) < BASELINE_MIN_EVENTS:
+        return {
+            "score": 0,
+            "severity": "low",
+            "reasons": ["Not enough historical events to build a baseline yet"],
+            "baseline_ready": False
+        }
+
+    feature_matrix = [encode_event_features(existing_event, profile) for existing_event in events]
+    model = IsolationForest(
+        contamination=0.2,
+        random_state=ISOLATION_FOREST_SEED,
+        n_estimators=100
+    )
+    model.fit(feature_matrix)
+
+    current_features = [encode_event_features(event, profile)]
+    prediction = int(model.predict(current_features)[0])
+    raw_score = float(-model.score_samples(current_features)[0])
+    normalized_score = max(0, min(100, int(raw_score * 40)))
+
+    timestamp = parse_behavior_timestamp(event.get("timestamp"))
+    reasons = []
+    if timestamp.hour not in profile.get("usual_hours", []):
+        reasons.append(f"Activity at unusual hour {timestamp.hour}:00 UTC")
+    if event.get("location") not in profile.get("usual_locations", []):
+        reasons.append(f"Unexpected location: {event.get('location')}")
+    if event.get("resource") not in profile.get("usual_resources", []):
+        reasons.append(f"New resource access pattern: {event.get('resource')}")
+
+    avg_api_calls = profile.get("avg_api_calls", 0)
+    std_api_calls = profile.get("std_api_calls", 0)
+    if event.get("api_calls", 0) > avg_api_calls + max(20, 2 * std_api_calls):
+        reasons.append(
+            f"API volume spike: {event.get('api_calls')} calls vs baseline {avg_api_calls}"
+        )
+
+    if prediction == -1 and normalized_score < 40:
+        normalized_score = 40
+
+    severity = "low"
+    if normalized_score >= 75:
+        severity = "high"
+    elif normalized_score >= 40:
+        severity = "medium"
+
+    return {
+        "score": normalized_score,
+        "severity": severity,
+        "reasons": reasons or ["IsolationForest flagged this event as anomalous"],
+        "baseline_ready": True
+    }
+
+async def evaluate_behavior_event(event: dict) -> dict:
+    historical_events = await db.behavior_events.find(
+        {"account_id": event["account_id"]},
+        {"_id": 0}
+    ).sort("timestamp", 1).to_list(500)
+    prior_events = [item for item in historical_events if item["id"] != event["id"]]
+
+    profile = await db.behavior_profiles.find_one({"account_id": event["account_id"]}, {"_id": 0})
+    if not profile and len(prior_events) >= BASELINE_MIN_EVENTS:
+        profile = build_baseline_profile(event["account_id"], event["account_type"], prior_events)
+        await db.behavior_profiles.update_one(
+            {"account_id": event["account_id"]},
+            {"$set": profile},
+            upsert=True
+        )
+
+    scored = score_behavior_event(event, profile, prior_events)
+    anomaly = {
+        "id": str(uuid.uuid4()),
+        "account_id": event["account_id"],
+        "account_type": event["account_type"],
+        "event_id": event["id"],
+        "score": scored["score"],
+        "severity": scored["severity"],
+        "reasons": scored["reasons"],
+        "baseline_ready": scored["baseline_ready"],
+        "location": event["location"],
+        "resource": event["resource"],
+        "api_calls": event["api_calls"],
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    await db.behavior_anomalies.insert_one(anomaly)
+
+    if scored["baseline_ready"] and scored["score"] >= 40:
+        alert = {
+            "id": f"alert-ml-{uuid.uuid4().hex[:8]}",
+            "title": f"Behavioral anomaly detected for {event['account_id']}",
+            "description": "; ".join(scored["reasons"]),
+            "severity": scored["severity"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "AI Baselining (IsolationForest)",
+            "status": "open",
+            "escalated": False,
+            "assigned_to": None,
+            "assigned_name": "Unassigned",
+            "details": {
+                "account_id": event["account_id"],
+                "location": event["location"],
+                "api_calls": event["api_calls"],
+                "resource": event["resource"],
+                "anomaly_score": scored["score"],
+                "recommended_action": "Review this activity against the learned baseline profile",
+                "baseline_reasons": scored["reasons"],
+                "model": "IsolationForest"
+            }
+        }
+        await db.alerts.insert_one(alert)
+        await trigger_outgoing_webhooks("alert_created", alert)
+        anomaly["alert_id"] = alert["id"]
+
+    return anomaly
+
 async def queue_or_apply_permission_change(change_id: str, reason: str = "approved"):
     change = await db.permission_changes.find_one({"id": change_id}, {"_id": 0})
     if not change:
@@ -613,6 +839,50 @@ async def init_data():
                 ]
             }
         })
+
+    behavior_events_count = await db.behavior_events.count_documents({})
+    if behavior_events_count == 0:
+        seeded_events = []
+        base_date = datetime.now(timezone.utc) - timedelta(days=14)
+        for day in range(14):
+            event_day = base_date + timedelta(days=day)
+            seeded_events.extend([
+                {
+                    "id": str(uuid.uuid4()),
+                    "account_id": "john.doe@company.com",
+                    "account_type": "user",
+                    "event_type": "console_login",
+                    "timestamp": event_day.replace(hour=10, minute=15).isoformat(),
+                    "location": "New York, USA",
+                    "api_calls": 22 + (day % 4),
+                    "resource": "iam:read",
+                    "metadata": {"source": "seed"}
+                },
+                {
+                    "id": str(uuid.uuid4()),
+                    "account_id": "sa-billing",
+                    "account_type": "service_account",
+                    "event_type": "api_activity",
+                    "timestamp": event_day.replace(hour=2, minute=25).isoformat(),
+                    "location": "AWS us-east-1",
+                    "api_calls": 120 + day * 3,
+                    "resource": "billing:invoices",
+                    "metadata": {"source": "seed"}
+                },
+                {
+                    "id": str(uuid.uuid4()),
+                    "account_id": "sarah.lead@company.com",
+                    "account_type": "user",
+                    "event_type": "security_review",
+                    "timestamp": event_day.replace(hour=14, minute=5).isoformat(),
+                    "location": "London, UK",
+                    "api_calls": 18 + (day % 3),
+                    "resource": "securityhub:findings",
+                    "metadata": {"source": "seed"}
+                }
+            ])
+        await db.behavior_events.insert_many(seeded_events)
+        await recompute_behavioral_baselines()
 
 async def send_alert_notification(alert: dict):
     """Send email notification for a new alert"""
@@ -994,6 +1264,85 @@ async def update_operations_settings(config: OperationsConfig, payload: dict = D
         upsert=True
     )
     return {"success": True, "config": config_payload}
+
+# =============================================================================
+# AI-DRIVEN BEHAVIORAL BASELINING - IsolationForest anomaly model
+# =============================================================================
+
+@api_router.get("/behavioral/summary")
+async def get_behavioral_summary(payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    profiles = await db.behavior_profiles.find({}, {"_id": 0}).sort("updated_at", -1).to_list(20)
+    recent_anomalies = await db.behavior_anomalies.find({}, {"_id": 0}).sort("timestamp", -1).to_list(10)
+    return {
+        "profiles_built": len(profiles),
+        "anomalies_detected": len([item for item in recent_anomalies if item.get("baseline_ready")]),
+        "high_severity_anomalies": len([item for item in recent_anomalies if item.get("severity") == "high"]),
+        "profiles": profiles[:5],
+        "recent_anomalies": recent_anomalies[:5]
+    }
+
+@api_router.post("/behavioral/recompute")
+async def recompute_behavioral_profiles(payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    result = await recompute_behavioral_baselines()
+    await db.activity_log.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "Behavior Baselines Recomputed",
+        "item_type": "behavior_profile",
+        "item_id": "all",
+        "user_id": payload["user_id"],
+        "user_name": payload["email"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "details": f"Built {result['profiles_built']} profiles from {result['event_count']} events using IsolationForest"
+    })
+    return {"success": True, **result, "model": "IsolationForest"}
+
+@api_router.post("/behavioral/events")
+async def ingest_behavior_event(request: BehaviorEventRequest, payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    event = request.model_dump()
+    event["id"] = str(uuid.uuid4())
+    event["timestamp"] = parse_behavior_timestamp(request.timestamp).isoformat()
+    await db.behavior_events.insert_one(event)
+    anomaly = await evaluate_behavior_event(event)
+    return {
+        "success": True,
+        "event_id": event["id"],
+        "anomaly": strip_mongo_ids(anomaly),
+        "model": "IsolationForest"
+    }
+
+@api_router.post("/behavioral/simulate")
+async def simulate_behavioral_anomaly(payload: dict = Depends(verify_token)):
+    if payload["role"] not in ["admin", "team_lead"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    event = {
+        "id": str(uuid.uuid4()),
+        "account_id": "sa-billing",
+        "account_type": "service_account",
+        "event_type": "api_activity",
+        "timestamp": datetime.now(timezone.utc).replace(hour=23, minute=40).isoformat(),
+        "location": "Berlin, Germany",
+        "api_calls": 900,
+        "resource": "s3:customer-export",
+        "metadata": {"source": "simulator", "triggered_by": payload["user_id"]}
+    }
+    await db.behavior_events.insert_one(event)
+    anomaly = await evaluate_behavior_event(event)
+    return {
+        "success": True,
+        "event": strip_mongo_ids(event),
+        "anomaly": strip_mongo_ids(anomaly),
+        "model": "IsolationForest"
+    }
 
 # =============================================================================
 # JIT PRIVILEGED ACCESS - Request, Approve, Auto-Expire

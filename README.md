@@ -5,7 +5,7 @@ Sentinel is a security operations dashboard with role-based views, alert monitor
 ## Current Project State
 
 - Frontend is fully usable in frontend-only mode (no backend required).
-- Backend now includes testable JIT privileged access, sales-safe operations settings, maintenance-window aware permission changes, offboarding updates, and credential rotation flows.
+- Backend now includes testable JIT privileged access, sales-safe operations settings, maintenance-window aware permission changes, offboarding updates, credential rotation flows, and an ML-based behavioral baselining workflow.
 - Sidebar navigation is split into dedicated pages:
   - Dashboard
   - Users & Accounts
@@ -87,6 +87,9 @@ If you want live API data instead of mock fallback:
 
 	pip install -r requirements.txt
 
+	Note:
+	- The backend now uses `scikit-learn` for behavioral anomaly detection (`IsolationForest`).
+
 3) Create backend env file
 
 	Create backend/.env with:
@@ -118,6 +121,7 @@ If you want live API data instead of mock fallback:
 - Theme preference and notification preferences are persisted in localStorage.
 - Access Hygiene "Overprivileged Accounts" click works in fallback mode and opens the permission flow modal.
 - Dashboard includes live test surfaces for:
+  - ML-driven behavioral baselining and anomaly simulation
   - JIT privileged access request/approval/revocation
   - Sales-safe operations settings
   - Maintenance-window permission changes
@@ -125,6 +129,14 @@ If you want live API data instead of mock fallback:
   - Credential rotation
 
 ## New Backend + UI Flows Added
+
+- AI-Driven Behavioral Baselining
+  - Uses a free local ML model: `IsolationForest` from `scikit-learn`
+  - Learns normal behavior from stored activity events for each user/service account
+  - Scores new events for anomalies based on time, location, resource access, and API-call volume
+  - Can simulate anomalous activity directly from the dashboard
+  - Converts strong anomalies into standard dashboard alerts
+  - Current implementation is powered by Mongo-stored activity history and simulation data, not AWS telemetry yet
 
 - JIT Privileged Access
   - Admins and team leads can create requests that become active immediately.
@@ -157,20 +169,27 @@ If you want live API data instead of mock fallback:
 	- Confirm it becomes `active` immediately
 	- Revoke it and confirm status changes
 
-3) Sales-Safe Operations panel
+3) Behavioral Baselining panel
+
+	- Click `Recompute Baselines`
+	- Click `Simulate Anomaly`
+	- Confirm a new anomaly appears in the panel
+	- Confirm a new behavioral alert is created in the alert flow
+
+4) Sales-Safe Operations panel
 
 	- Toggle `Safe Mode`
 	- Toggle `Peak Season Active`
 	- Save settings
 
-4) Access Hygiene
+5) Access Hygiene
 
 	- Open the permission modal from an overprivileged account
 	- Select `Maintenance Window`
 	- Submit the permission change
 	- Confirm the request succeeds and queues when outside a window
 
-5) Offboarding / Credentials
+6) Offboarding / Credentials
 
 	- Open detail modals
 	- Trigger actions

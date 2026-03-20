@@ -10,6 +10,7 @@ import OffboardingTracker from "@/components/dashboard/OffboardingTracker";
 import DetailModal from "@/components/dashboard/DetailModal";
 import JITAccessPanel from "@/components/dashboard/JITAccessPanel";
 import OperationsPanel from "@/components/dashboard/OperationsPanel";
+import BehaviorBaseliningPanel from "@/components/dashboard/BehaviorBaseliningPanel";
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -158,6 +159,7 @@ const Dashboard = () => {
 
   useEffect(() => {
     fetchAllData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   const getLocalDetailData = (type, id) => {
@@ -386,11 +388,17 @@ const Dashboard = () => {
               <MetricsGrid metrics={dashboardData.metrics} isPersonalView={isPersonalView} />
             </section>
 
+            <div className="grid grid-cols-1 gap-6">
+              <section className="animate-fade-in stagger-2" data-testid="behavior-baselining-section">
+                <BehaviorBaseliningPanel onRefresh={fetchAllData} />
+              </section>
+            </div>
+
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <section className="animate-fade-in stagger-2" data-testid="jit-access-section">
+              <section className="animate-fade-in stagger-3" data-testid="jit-access-section">
                 <JITAccessPanel />
               </section>
-              <section className="animate-fade-in stagger-3" data-testid="operations-section">
+              <section className="animate-fade-in stagger-4" data-testid="operations-section">
                 <OperationsPanel />
               </section>
             </div>

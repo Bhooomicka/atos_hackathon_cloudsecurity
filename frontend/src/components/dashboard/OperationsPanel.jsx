@@ -44,6 +44,7 @@ const OperationsPanel = () => {
     if (user?.role === "admin" || user?.role === "team_lead") {
       fetchConfig();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, user?.role]);
 
   if (user?.role !== "admin" && user?.role !== "team_lead") {
