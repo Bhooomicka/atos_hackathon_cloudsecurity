@@ -22,6 +22,18 @@ Sentinel is a security operations dashboard with role-based views, alert monitor
 - tests, test_reports: backend testing assets
 - docs: cloud/deployment documentation
 
+## AWS Trial-Friendly Deployment
+
+For a credit-conscious AWS setup aligned to the security architecture (IAM, CloudTrail/GuardDuty, Secrets Manager, Config/Security Hub, EventBridge/Lambda, CI policy checks), use:
+
+- `docs/AWS_FREE_TRIAL_SECURITY_RUNBOOK.md`
+
+## Student Free Deployment (No Upfront Cloud Spend)
+
+For a zero-upfront path using Vercel + Render + MongoDB Atlas free tier, use:
+
+- `docs/STUDENT_FREE_DEPLOYMENT.md`
+
 ## Prerequisites
 
 - Node.js 18+

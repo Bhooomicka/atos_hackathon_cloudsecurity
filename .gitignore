@@ -33,6 +33,7 @@ next-env.d.ts
 # Environment and secrets
 *.env
 *.env.*
+*.env.example
 *token.json*
 *credentials.json*
 *.pem
@@ -78,5 +79,8 @@ agenthub/agents/youtube/db
 *.deb
 *.dylib
 
-# Android SDK local path
+# Mobile / local SDK paths
 android-sdk/
+frontend/node_modules/.cache/default-development/1.pack
+frontend/node_modules/.cache/default-development/2.pack
+frontend/node_modules/.cache/default-development/3.pack

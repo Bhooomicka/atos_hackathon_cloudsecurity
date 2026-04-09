@@ -1,0 +1,12 @@
+# Paste these in Render -> Service -> Environment
+
+MONGO_URL=mongodb+srv://bhooomickadeepak_db_user:<YOUR_PASSWORD>@cluster0.<YOUR_CLUSTER_ID>.mongodb.net/sentinel_prod?retryWrites=true&w=majority&appName=Cluster0
+DB_NAME=sentinel_prod
+JWT_SECRET=replace-with-a-long-random-secret
+CORS_ORIGINS=https://<your-vercel-app>.vercel.app
+RESEND_API_KEY=
+EMAIL_FROM=alerts@sentinel-dashboard.com
+
+# Notes:
+# 1) Replace <YOUR_PASSWORD> and <YOUR_CLUSTER_ID>.
+# 2) In MongoDB Atlas Network Access, add 0.0.0.0/0 so Render can connect.
