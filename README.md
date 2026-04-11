@@ -65,7 +65,13 @@ This is the recommended mode for local UI development.
 
 ## Mock Login (When Backend Is Not Running)
 
-The app automatically falls back to mock authentication if backend login is unavailable.
+Mock authentication is now opt-in and controlled by an env flag.
+
+To enable mock login fallback, add this to `frontend/.env`:
+
+`REACT_APP_ENABLE_DEMO_MODE=true`
+
+If this flag is not set, failed backend login attempts are treated as real login failures.
 
 Mock users:
 
@@ -111,10 +117,14 @@ If you want live API data instead of mock fallback:
 	JWT_SECRET=your-local-jwt-secret
 	CORS_ORIGINS=http://localhost:3000
 	EMAIL_FROM=alerts@sentinel-dashboard.com
+	INCOMING_WEBHOOK_SECRET=optional-shared-secret
+	INTEGRATION_API_KEY=optional-integration-key
 
 	Notes:
 	- MongoDB is required for live backend mode.
 	- RESEND_API_KEY is optional. Without it, emails are mocked and stored in MongoDB.
+	- If `INCOMING_WEBHOOK_SECRET` is set, `/api/webhooks/incoming` requires `X-Webhook-Secret`.
+	- If `INTEGRATION_API_KEY` is set, `/api/integrations/hr/offboarding` requires `X-Integration-Key`.
 	- The database does not need to be created manually; the app seeds data on startup.
 
 4) Run API
@@ -129,7 +139,7 @@ If you want live API data instead of mock fallback:
 
 ## Key Frontend Behavior
 
-- If backend calls fail, dashboard and auth use local fallback data so the UI stays interactive.
+- If backend calls fail, dashboard uses local fallback data. Auth fallback is available only when `REACT_APP_ENABLE_DEMO_MODE=true`.
 - Theme preference and notification preferences are persisted in localStorage.
 - Access Hygiene "Overprivileged Accounts" click works in fallback mode and opens the permission flow modal.
 - Dashboard includes live test surfaces for:

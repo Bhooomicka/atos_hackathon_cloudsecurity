@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -15,6 +15,7 @@ import hashlib
 import asyncio
 import math
 import statistics
+import hmac
 from sklearn.ensemble import IsolationForest
 
 ROOT_DIR = Path(__file__).parent
@@ -32,6 +33,8 @@ JWT_ALGORITHM = "HS256"
 # Email Configuration (Resend - mocked for now)
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', None)
 EMAIL_FROM = os.environ.get('EMAIL_FROM', 'alerts@sentinel-dashboard.com')
+INCOMING_WEBHOOK_SECRET = os.environ.get("INCOMING_WEBHOOK_SECRET")
+INTEGRATION_API_KEY = os.environ.get("INTEGRATION_API_KEY")
 
 # Escalation Configuration
 ESCALATION_HOURS = 1  # High severity alerts escalate after 1 hour
@@ -451,6 +454,9 @@ def strip_mongo_ids(value):
 
 BASELINE_MIN_EVENTS = 8
 ISOLATION_FOREST_SEED = 42
+SEED_ADMIN_PASSWORD = os.environ.get("SEED_ADMIN_PASSWORD", "12345")
+SEED_TEAM_LEAD_PASSWORD = os.environ.get("SEED_TEAM_LEAD_PASSWORD", "lead123")
+SEED_TEAM_MEMBER_PASSWORD = os.environ.get("SEED_TEAM_MEMBER_PASSWORD", "member123")
 
 def parse_behavior_timestamp(value: Optional[str]) -> datetime:
     if not value:
@@ -706,7 +712,7 @@ TEAM_USERS = [
     {
         "id": "user-admin-001",
         "email": "bhooomickadg@gmail.com",
-        "password": hash_password("12345"),
+        "password": hash_password(SEED_ADMIN_PASSWORD),
         "name": "Bhoomi Kadge",
         "role": "admin",
         "department": "Security",
@@ -716,7 +722,7 @@ TEAM_USERS = [
     {
         "id": "user-lead-001",
         "email": "sarah.lead@company.com",
-        "password": hash_password("lead123"),
+        "password": hash_password(SEED_TEAM_LEAD_PASSWORD),
         "name": "Sarah Mitchell",
         "role": "team_lead",
         "department": "Security Operations",
@@ -726,7 +732,7 @@ TEAM_USERS = [
     {
         "id": "user-member-001",
         "email": "john.doe@company.com",
-        "password": hash_password("member123"),
+        "password": hash_password(SEED_TEAM_MEMBER_PASSWORD),
         "name": "John Doe",
         "role": "team_member",
         "department": "IAM",
@@ -736,7 +742,7 @@ TEAM_USERS = [
     {
         "id": "user-member-002",
         "email": "emily.chen@company.com",
-        "password": hash_password("member123"),
+        "password": hash_password(SEED_TEAM_MEMBER_PASSWORD),
         "name": "Emily Chen",
         "role": "team_member",
         "department": "Compliance",
@@ -746,7 +752,7 @@ TEAM_USERS = [
     {
         "id": "user-member-003",
         "email": "mike.wilson@company.com",
-        "password": hash_password("member123"),
+        "password": hash_password(SEED_TEAM_MEMBER_PASSWORD),
         "name": "Mike Wilson",
         "role": "team_member",
         "department": "Infrastructure",
@@ -963,14 +969,25 @@ async def get_metrics(payload: dict = Depends(verify_token)):
             "is_personal_view": True
         }
     else:
+        total_active_users = await db.users.count_documents({})
+        service_accounts_hygiene = await db.access_hygiene.count_documents({"account_type": "Service Account"})
+        service_accounts_behavior = len(await db.behavior_events.distinct("account_id", {"account_type": "service_account"}))
+        service_accounts = max(service_accounts_hygiene, service_accounts_behavior)
+        open_alerts = await db.alerts.count_documents({"status": "open"})
+        due_credentials = await db.credentials.count_documents({"status": {"$in": ["pending", "overdue"]}})
+        pending_offboarding = await db.offboarding.count_documents({"access_revoked": False})
+        hygiene_issues = await db.access_hygiene.count_documents({})
+        active_jit = await db.jit_access_requests.count_documents({"status": "active"})
+        privileged_accounts = await db.access_hygiene.count_documents({"type": "overprivileged"}) + active_jit
+
         return {
-            "total_active_users": 1284,
-            "service_accounts": 156,
-            "privileged_accounts": 47,
-            "flagged_accounts": 12,
-            "credentials_due_rotation": 23,
-            "pending_offboarding": 2,
-            "hygiene_issues": 109,
+            "total_active_users": total_active_users,
+            "service_accounts": service_accounts,
+            "privileged_accounts": privileged_accounts,
+            "flagged_accounts": open_alerts,
+            "credentials_due_rotation": due_credentials,
+            "pending_offboarding": pending_offboarding,
+            "hygiene_issues": hygiene_issues,
             "is_personal_view": False
         }
 
@@ -1024,17 +1041,36 @@ async def update_alert(alert_id: str, request: UpdateAlertRequest, payload: dict
 
 @api_router.get("/dashboard/alerts-chart")
 async def get_alerts_chart(payload: dict = Depends(verify_token)):
-    import random
-    chart_data = []
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+    alerts = await db.alerts.find({}, {"_id": 0, "timestamp": 1, "severity": 1}).to_list(5000)
+
+    series = []
+    keyed = {}
     for i in range(6, -1, -1):
-        date = datetime.now(timezone.utc) - timedelta(days=i)
-        chart_data.append({
-            "date": date.strftime("%a"),
-            "high": random.randint(2, 8),
-            "medium": random.randint(5, 15),
-            "low": random.randint(10, 25)
-        })
-    return chart_data
+        day = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        key = day.strftime("%Y-%m-%d")
+        keyed[key] = {
+            "date": day.strftime("%a"),
+            "high": 0,
+            "medium": 0,
+            "low": 0
+        }
+        series.append(keyed[key])
+
+    for alert in alerts:
+        event_time = parse_behavior_timestamp(alert.get("timestamp"))
+        if event_time < start:
+            continue
+        key = event_time.strftime("%Y-%m-%d")
+        if key not in keyed:
+            continue
+        severity = (alert.get("severity") or "low").lower()
+        if severity not in ("high", "medium", "low"):
+            severity = "low"
+        keyed[key][severity] += 1
+
+    return series
 
 @api_router.get("/dashboard/access-hygiene")
 async def get_access_hygiene(payload: dict = Depends(verify_token)):
@@ -1051,9 +1087,9 @@ async def get_access_hygiene(payload: dict = Depends(verify_token)):
     violations = len([i for i in items if i["type"] == "policy_violation"])
     
     return {
-        "overprivileged_accounts": overprivileged if user_role == "team_member" else 34,
-        "stale_accounts": stale if user_role == "team_member" else 67,
-        "policy_violations": violations if user_role == "team_member" else 8,
+        "overprivileged_accounts": overprivileged,
+        "stale_accounts": stale,
+        "policy_violations": violations,
         "items": items
     }
 
@@ -1132,11 +1168,13 @@ async def get_credentials(payload: dict = Depends(verify_token)):
     
     pending = len([c for c in creds if c["status"] == "pending"])
     overdue = len([c for c in creds if c["status"] == "overdue"])
-    total = max(1, pending + overdue)
+    due_pool = pending + overdue
+    on_schedule_percent = 100 if due_pool == 0 else round((pending / due_pool) * 100)
+    overdue_percent = 0 if due_pool == 0 else round((overdue / due_pool) * 100)
     
     return {
-        "on_schedule_percent": 78 if user_role != "team_member" else round((pending / total) * 100),
-        "overdue_percent": 22 if user_role != "team_member" else round((overdue / total) * 100),
+        "on_schedule_percent": on_schedule_percent,
+        "overdue_percent": overdue_percent,
         "next_rotations": creds
     }
 
@@ -1484,12 +1522,20 @@ async def revoke_jit_access_request(request_id: str, decision: JITAccessDecision
 # =============================================================================
 
 @api_router.post("/webhooks/incoming")
-async def receive_webhook(event: WebhookEvent):
+async def receive_webhook(
+    event: WebhookEvent,
+    x_webhook_secret: Optional[str] = Header(default=None, alias="X-Webhook-Secret")
+):
     """
     Receive webhooks from external systems (Jenkins, GitHub, Terraform, etc.)
     This endpoint can be called without authentication for automated systems.
     Use webhook secrets for validation in production.
     """
+    if INCOMING_WEBHOOK_SECRET and (
+        not x_webhook_secret or not hmac.compare_digest(x_webhook_secret, INCOMING_WEBHOOK_SECRET)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
     event_id = str(uuid.uuid4())
     timestamp = event.timestamp or datetime.now(timezone.utc).isoformat()
     
@@ -1568,11 +1614,19 @@ async def list_webhook_events(payload: dict = Depends(verify_token)):
 # =============================================================================
 
 @api_router.post("/integrations/hr/offboarding")
-async def hr_offboarding_trigger(request: HROffboardingRequest):
+async def hr_offboarding_trigger(
+    request: HROffboardingRequest,
+    x_integration_key: Optional[str] = Header(default=None, alias="X-Integration-Key")
+):
     """
     Receive offboarding requests from HR systems (Workday, BambooHR, etc.)
     Automatically creates offboarding record and assigns to team member.
     """
+    if INTEGRATION_API_KEY and (
+        not x_integration_key or not hmac.compare_digest(x_integration_key, INTEGRATION_API_KEY)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid integration key")
+
     offboarding_id = f"off-hr-{str(uuid.uuid4())[:8]}"
     
     # Find a team member to assign (round-robin or least loaded)
@@ -1942,10 +1996,19 @@ async def root():
 # Include router
 app.include_router(api_router)
 
+cors_origins = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000"
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

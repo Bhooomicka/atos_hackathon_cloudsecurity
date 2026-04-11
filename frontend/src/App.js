@@ -13,6 +13,7 @@ import CompliancePage from "@/pages/CompliancePage";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
+const DEMO_MODE_ENABLED = process.env.REACT_APP_ENABLE_DEMO_MODE === "true";
 
 // Auth Context
 const AuthContext = createContext(null);
@@ -111,7 +112,7 @@ const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     const verifyToken = async () => {
-      if (token === "mock-token-12345") {
+      if (token === "mock-token-12345" && DEMO_MODE_ENABLED) {
         const savedMockUser = localStorage.getItem("sentinel-mock-user");
         const parsedMockUser = savedMockUser ? JSON.parse(savedMockUser) : null;
         setUser(
@@ -128,6 +129,15 @@ const AuthProvider = ({ children }) => {
         return;
       }
 
+      if (token === "mock-token-12345" && !DEMO_MODE_ENABLED) {
+        localStorage.removeItem("sentinel-token");
+        localStorage.removeItem("sentinel-mock-user");
+        setToken(null);
+        setUser(null);
+        setLoading(false);
+        return;
+      }
+
       if (token) {
         try {
           const response = await axios.get(`${API}/auth/me`, {
@@ -136,7 +146,7 @@ const AuthProvider = ({ children }) => {
           setUser(response.data);
         } catch (error) {
           console.warn("Token verification failed", error);
-          if (error.code === "ERR_NETWORK" || !error.response) {
+          if ((error.code === "ERR_NETWORK" || !error.response) && DEMO_MODE_ENABLED) {
              console.warn("Backend unavailable, keeping session active with mock user.");
              // Keep the session alive for dev mode
              setUser({
@@ -168,6 +178,9 @@ const AuthProvider = ({ children }) => {
       setUser(userData);
       return userData;
     } catch (error) {
+      if (!DEMO_MODE_ENABLED) {
+        throw error;
+      }
       console.warn("Backend login failed, using mock login due to error:", error);
       const mockToken = "mock-token-12345";
       const mockUser = getMockUser(email);

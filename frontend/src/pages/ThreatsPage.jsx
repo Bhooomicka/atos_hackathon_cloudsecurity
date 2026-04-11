@@ -52,23 +52,27 @@ const ThreatsPage = () => {
   const [modalData, setModalData] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [chartData, setChartData] = useState([]);
+  const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const authHeaders = { headers: { Authorization: `Bearer ${token}` } };
 
   const loadThreats = async () => {
     try {
-      const [alertsRes, chartRes] = await Promise.all([
+      const [alertsRes, chartRes, notificationsRes] = await Promise.all([
         axios.get(`${API}/dashboard/alerts`, authHeaders),
-        axios.get(`${API}/dashboard/alerts-chart`, authHeaders)
+        axios.get(`${API}/dashboard/alerts-chart`, authHeaders),
+        axios.get(`${API}/dashboard/notifications`, authHeaders)
       ]);
 
       setAlerts(alertsRes.data);
       setChartData(chartRes.data);
+      setNotifications(notificationsRes.data || []);
     } catch (error) {
       console.warn("Using local threat data because the backend was unavailable:", error);
       setAlerts(buildFallbackAlerts());
       setChartData(buildFallbackChartData());
+      setNotifications([]);
     } finally {
       setLoading(false);
     }
@@ -151,7 +155,7 @@ const ThreatsPage = () => {
       />
 
       <div className={`flex-1 flex flex-col transition-all duration-300 ${sidebarCollapsed ? "ml-16" : "ml-64"}`}>
-        <Header notifications={[]} />
+        <Header notifications={notifications} />
 
         <main className="flex-1 p-6 overflow-auto">
           <div className="max-w-7xl mx-auto space-y-6">
@@ -167,7 +171,7 @@ const ThreatsPage = () => {
                 alerts={alerts}
                 chartData={chartData}
                 onAlertClick={handleAlertClick}
-                isPersonalView={false}
+                isPersonalView={user?.role === "team_member"}
               />
             )}
           </div>

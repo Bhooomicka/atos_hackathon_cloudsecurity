@@ -57,17 +57,23 @@ const CredentialsPage = () => {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalData, setModalData] = useState(null);
   const [credentials, setCredentials] = useState(null);
+  const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const authHeaders = { headers: { Authorization: `Bearer ${token}` } };
 
   const loadCredentials = async () => {
     try {
-      const response = await axios.get(`${API}/dashboard/credentials`, authHeaders);
-      setCredentials(response.data);
+      const [credentialsRes, notificationsRes] = await Promise.all([
+        axios.get(`${API}/dashboard/credentials`, authHeaders),
+        axios.get(`${API}/dashboard/notifications`, authHeaders)
+      ]);
+      setCredentials(credentialsRes.data);
+      setNotifications(notificationsRes.data || []);
     } catch (error) {
       console.warn("Using local credential data because the backend was unavailable:", error);
       setCredentials(buildFallbackCredentials());
+      setNotifications([]);
     } finally {
       setLoading(false);
     }
@@ -173,7 +179,7 @@ const CredentialsPage = () => {
       />
 
       <div className={`flex-1 flex flex-col transition-all duration-300 ${sidebarCollapsed ? "ml-16" : "ml-64"}`}>
-        <Header notifications={[]} />
+        <Header notifications={notifications} />
 
         <main className="flex-1 p-6 overflow-auto">
           <div className="max-w-7xl mx-auto space-y-6">

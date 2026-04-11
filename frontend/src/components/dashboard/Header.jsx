@@ -16,11 +16,12 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 const Header = ({ notifications = [] }) => {
-  const { user, logout } = useAuth();
+  const { user, logout, token } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const [showNotifications, setShowNotifications] = useState(false);
 
   const unreadCount = notifications.filter(n => !n.read).length;
+  const isDemoData = token === "mock-token-12345";
 
   const getSeverityColor = (severity) => {
     switch (severity) {
@@ -57,6 +58,11 @@ const Header = ({ notifications = [] }) => {
       {/* Right side actions */}
       <div className="flex items-center gap-2">
         {/* Theme Toggle */}
+        {isDemoData && (
+          <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-500 border-amber-500/30">
+            Demo Data
+          </Badge>
+        )}
         <Button
           variant="ghost"
           size="icon"
