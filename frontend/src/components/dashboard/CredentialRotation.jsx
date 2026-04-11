@@ -98,7 +98,7 @@ const CredentialRotation = ({ data, onItemClick }) => {
                         {getTypeIcon(rotation.type)}
                       </div>
                       <div>
-                        <p className="text-sm font-medium">{rotation.name}</p>
+                        <p className="text-sm font-medium">{rotation.name || rotation.service_name}</p>
                         <p className="text-xs text-muted-foreground">{rotation.type}</p>
                       </div>
                     </div>

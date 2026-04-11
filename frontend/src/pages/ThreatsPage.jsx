@@ -1,44 +1,83 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import axios from "axios";
+import { API, useAuth } from "@/App";
 import Sidebar from "@/components/dashboard/Sidebar";
 import Header from "@/components/dashboard/Header";
 import ThreatSection from "@/components/dashboard/ThreatSection";
 import DetailModal from "@/components/dashboard/DetailModal";
 
-const mockAlerts = [
+const hoursAgo = (hours) => new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+const buildFallbackAlerts = () => [
   {
-    id: 1,
+    id: "local-alert-001",
     title: "Suspicious Login Attempt",
     severity: "high",
     status: "open",
     description: "Multiple failed login attempts from unknown IP.",
     source: "SIEM",
-    timestamp: new Date().toISOString()
+    timestamp: hoursAgo(1)
   },
   {
-    id: 2,
+    id: "local-alert-002",
     title: "New Device Detected",
     severity: "medium",
     status: "investigating",
     description: "User account accessed from an unrecognized device.",
     source: "Identity Provider",
-    timestamp: new Date().toISOString()
+    timestamp: hoursAgo(3)
   }
 ];
 
-const mockChartData = [
-  { date: "2023-10-01", high: 2, medium: 5, low: 10 },
-  { date: "2023-10-02", high: 1, medium: 3, low: 8 },
-  { date: "2023-10-03", high: 4, medium: 2, low: 9 },
-  { date: "2023-10-04", high: 0, medium: 4, low: 7 },
-  { date: "2023-10-05", high: 2, medium: 6, low: 11 }
-];
+const buildFallbackChartData = () =>
+  Array.from({ length: 7 }, (_, index) => {
+    const daysAgo = 6 - index;
+    const date = new Date();
+    date.setDate(date.getDate() - daysAgo);
+
+    return {
+      date: date.toLocaleDateString(undefined, { weekday: "short" }),
+      high: [2, 1, 4, 0, 2, 3, 1][index],
+      medium: [5, 3, 2, 4, 6, 5, 4][index],
+      low: [10, 8, 9, 7, 11, 9, 8][index]
+    };
+  });
 
 const ThreatsPage = () => {
   const navigate = useNavigate();
+  const { token, user } = useAuth();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalData, setModalData] = useState(null);
+  const [alerts, setAlerts] = useState([]);
+  const [chartData, setChartData] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const authHeaders = { headers: { Authorization: `Bearer ${token}` } };
+
+  const loadThreats = async () => {
+    try {
+      const [alertsRes, chartRes] = await Promise.all([
+        axios.get(`${API}/dashboard/alerts`, authHeaders),
+        axios.get(`${API}/dashboard/alerts-chart`, authHeaders)
+      ]);
+
+      setAlerts(alertsRes.data);
+      setChartData(chartRes.data);
+    } catch (error) {
+      console.warn("Using local threat data because the backend was unavailable:", error);
+      setAlerts(buildFallbackAlerts());
+      setChartData(buildFallbackChartData());
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadThreats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
   const handleSidebarNavigate = (label) => {
     if (label === "Users & Accounts") {
@@ -61,18 +100,45 @@ const ThreatsPage = () => {
     navigate("/dashboard");
   };
 
-  const handleAlertClick = (id) => {
-    const alert = mockAlerts.find((item) => item.id === id);
-    if (!alert) return;
+  const getLocalAlertDetail = (id) => {
+    const alert = alerts.find((item) => item.id === id);
+    if (!alert) return null;
 
-    setModalData({
+    return {
       ...alert,
-      assigned_name: "Test User",
-      details: {
+      assigned_name: alert.assigned_name || user?.name || "Current User",
+      details: alert.details || {
         recommended_action: "Review account activity and enforce MFA challenge."
       }
-    });
-    setModalOpen(true);
+    };
+  };
+
+  const handleAlertClick = async (id) => {
+    try {
+      const response = await axios.get(`${API}/dashboard/alerts/${id}`, authHeaders);
+      setModalData(response.data);
+      setModalOpen(true);
+    } catch (error) {
+      console.warn("Using local alert details because the backend detail request failed:", error);
+      const alert = getLocalAlertDetail(id);
+      if (!alert) return;
+      setModalData(alert);
+      setModalOpen(true);
+    }
+  };
+
+  const handleAction = async (type, id, action) => {
+    try {
+      await axios.put(`${API}/dashboard/alerts/${id}`, { status: action }, authHeaders);
+      setModalOpen(false);
+      await loadThreats();
+    } catch (error) {
+      console.warn("Updating local alert state because the backend update failed:", error);
+      setAlerts((current) =>
+        current.map((alert) => alert.id === id ? { ...alert, status: action } : alert)
+      );
+      setModalOpen(false);
+    }
   };
 
   return (
@@ -94,12 +160,16 @@ const ThreatsPage = () => {
               <p className="text-muted-foreground mt-1">Review and investigate anomaly alerts.</p>
             </section>
 
-            <ThreatSection
-              alerts={mockAlerts}
-              chartData={mockChartData}
-              onAlertClick={handleAlertClick}
-              isPersonalView={false}
-            />
+            {loading ? (
+              <div className="text-muted-foreground">Loading threats...</div>
+            ) : (
+              <ThreatSection
+                alerts={alerts}
+                chartData={chartData}
+                onAlertClick={handleAlertClick}
+                isPersonalView={false}
+              />
+            )}
           </div>
         </main>
       </div>
@@ -109,8 +179,8 @@ const ThreatsPage = () => {
         onClose={() => setModalOpen(false)}
         data={modalData}
         type="alert"
-        onAction={async () => {}}
-        userRole="admin"
+        onAction={handleAction}
+        userRole={user?.role}
       />
     </div>
   );

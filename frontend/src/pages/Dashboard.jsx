@@ -12,6 +12,26 @@ import JITAccessPanel from "@/components/dashboard/JITAccessPanel";
 import OperationsPanel from "@/components/dashboard/OperationsPanel";
 import BehaviorBaseliningPanel from "@/components/dashboard/BehaviorBaseliningPanel";
 
+const formatDateOffset = (days) => {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+
+const buildFallbackAlertsChart = () =>
+  Array.from({ length: 7 }, (_, index) => {
+    const daysAgo = 6 - index;
+    const date = new Date();
+    date.setDate(date.getDate() - daysAgo);
+
+    return {
+      date: date.toLocaleDateString(undefined, { weekday: "short" }),
+      high: [2, 1, 4, 0, 2, 3, 1][index],
+      medium: [5, 3, 2, 4, 6, 5, 4][index],
+      low: [10, 8, 9, 7, 11, 9, 8][index]
+    };
+  });
+
 const Dashboard = () => {
   const navigate = useNavigate();
   const { token, user } = useAuth();
@@ -98,13 +118,7 @@ const Dashboard = () => {
           { id: 1, title: "Suspicious Login Attempt", severity: "high", timestamp: new Date().toISOString() },
           { id: 2, title: "New Device Detected", severity: "medium", timestamp: new Date().toISOString() }
         ],
-        alertsChart: [
-           { date: "2023-10-01", high: 2, medium: 5, low: 10 },
-           { date: "2023-10-02", high: 1, medium: 3, low: 8 },
-           { date: "2023-10-03", high: 4, medium: 2, low: 9 },
-           { date: "2023-10-04", high: 0, medium: 4, low: 7 },
-           { date: "2023-10-05", high: 2, medium: 6, low: 11 }
-        ],
+        alertsChart: buildFallbackAlertsChart(),
         accessHygiene: {
           overprivileged_accounts: 12,
           stale_accounts: 5,
@@ -135,8 +149,8 @@ const Dashboard = () => {
            on_schedule_percent: 85,
            overdue_percent: 15,
            next_rotations: [
-             { id: 1, service_name: "AWS Production Key", type: "API Key", due_date: "2023-10-25" },
-             { id: 2, service_name: "Database Admin", type: "Password", due_date: "2023-11-15" }
+             { id: 1, name: "AWS Production Key", type: "API Key", due_date: formatDateOffset(3), status: "pending" },
+             { id: 2, name: "Database Admin", type: "Password", due_date: formatDateOffset(-2), status: "overdue" }
            ]
         },
         compliance: {
@@ -208,14 +222,14 @@ const Dashboard = () => {
       if (!credential) return null;
       return {
         id: credential.id,
-        name: credential.service_name,
+        name: credential.name || credential.service_name,
         type: credential.type || "API Key",
-        status: "due_soon",
+        status: credential.status || "pending",
         due_date: credential.due_date,
         manager_name: user?.name || "Current User",
-        details: {
-          service: credential.service_name,
-          last_rotated: "2026-02-01",
+        details: credential.details || {
+          service: credential.name || credential.service_name,
+          last_rotated: formatDateOffset(-87),
           environment: "Production",
           rotation_policy: "Every 90 days",
           associated_services: ["API Gateway", "IAM"]
