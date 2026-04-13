@@ -38,7 +38,7 @@ const MetricCard = ({ title, value, subtitle, icon: Icon, trend, trendValue, col
   );
 };
 
-const MetricsGrid = ({ metrics, isPersonalView }) => {
+const MetricsGrid = ({ metrics, isPersonalView, userRole }) => {
   if (!metrics) return null;
 
   // Different metrics for team members vs admin/lead
@@ -50,7 +50,7 @@ const MetricsGrid = ({ metrics, isPersonalView }) => {
       icon: AlertTriangle,
       color: "bg-amber-500",
     },
-    {
+    userRole !== "team_member" && {
       title: "Pending Offboarding",
       value: metrics.pending_offboarding,
       subtitle: "Awaiting revocation",
@@ -71,7 +71,7 @@ const MetricsGrid = ({ metrics, isPersonalView }) => {
       icon: ClipboardList,
       color: "bg-blue-500",
     }
-  ] : [
+  ].filter(Boolean) : [
     {
       title: "Total Active Users",
       value: metrics.total_active_users,

@@ -241,6 +241,10 @@ const Dashboard = () => {
   };
 
   const handleItemClick = async (type, id) => {
+    if (type === "offboarding" && user?.role === "team_member") {
+      return;
+    }
+
     try {
       let endpoint = "";
       switch (type) {
@@ -353,6 +357,7 @@ const Dashboard = () => {
   }
 
   const isPersonalView = dashboardData.metrics?.is_personal_view;
+  const canViewOffboardingTracker = user?.role === "admin" || user?.role === "team_lead";
 
   return (
     <div className="min-h-screen bg-background flex" data-testid="dashboard-container">
@@ -399,7 +404,7 @@ const Dashboard = () => {
               <h2 className="text-lg font-semibold mb-4 text-foreground">
                 {isPersonalView ? "Your Tasks at a Glance" : "At a Glance"}
               </h2>
-              <MetricsGrid metrics={dashboardData.metrics} isPersonalView={isPersonalView} />
+              <MetricsGrid metrics={dashboardData.metrics} isPersonalView={isPersonalView} userRole={user?.role} />
             </section>
 
             <div className="grid grid-cols-1 gap-6">
@@ -418,7 +423,7 @@ const Dashboard = () => {
             </div>
 
             {/* Access Hygiene & Offboarding */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className={`grid grid-cols-1 ${canViewOffboardingTracker ? "lg:grid-cols-2" : ""} gap-6`}>
               <section className="animate-fade-in stagger-4" data-testid="access-hygiene-section">
                 <AccessHygiene 
                   data={dashboardData.accessHygiene}
@@ -426,12 +431,14 @@ const Dashboard = () => {
                   onRefresh={fetchAllData}
                 />
               </section>
-              <section className="animate-fade-in stagger-5" data-testid="offboarding-section">
-                <OffboardingTracker 
-                  data={dashboardData.offboarding}
-                  onItemClick={(id) => handleItemClick("offboarding", id)}
-                />
-              </section>
+              {canViewOffboardingTracker && (
+                <section className="animate-fade-in stagger-5" data-testid="offboarding-section">
+                  <OffboardingTracker 
+                    data={dashboardData.offboarding}
+                    onItemClick={(id) => handleItemClick("offboarding", id)}
+                  />
+                </section>
+              )}
             </div>
 
           </div>
