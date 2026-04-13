@@ -429,6 +429,7 @@ const Dashboard = () => {
                   data={dashboardData.accessHygiene}
                   onItemClick={(id) => handleItemClick("hygiene", id)}
                   onRefresh={fetchAllData}
+                  userRole={user?.role}
                 />
               </section>
               {canViewOffboardingTracker && (

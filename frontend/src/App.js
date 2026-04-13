@@ -54,10 +54,16 @@ const MOCK_USERS = [
   }
 ];
 
+const MOCK_USER_ALIASES = {
+  "john doe": "john.doe@company.com",
+  "john.doe": "john.doe@company.com",
+  "johndoe": "john.doe@company.com"
+};
+
 const getMockUser = (email) => {
-  const matchedUser = MOCK_USERS.find(
-    (mockUser) => mockUser.email === email
-  );
+  const normalizedInput = String(email || "").trim().toLowerCase();
+  const resolvedEmail = MOCK_USER_ALIASES[normalizedInput] || normalizedInput;
+  const matchedUser = MOCK_USERS.find((mockUser) => mockUser.email === resolvedEmail);
 
   if (matchedUser) {
     return {
@@ -79,9 +85,9 @@ const getMockUser = (email) => {
 
   return {
     id: "mock-user-1",
-    email: email || "user@example.com",
+    email: resolvedEmail || "user@example.com",
     name: fallbackName,
-    role: "admin",
+    role: "team_member",
     avatar: "",
     department: "Engineering"
   };

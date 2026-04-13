@@ -43,7 +43,7 @@ const MetricsGrid = ({ metrics, isPersonalView, userRole }) => {
 
   // Different metrics for team members vs admin/lead
   const metricsConfig = isPersonalView ? [
-    {
+    userRole !== "team_member" && {
       title: "Your Open Alerts",
       value: metrics.flagged_accounts,
       subtitle: "Assigned to you",
@@ -81,7 +81,7 @@ const MetricsGrid = ({ metrics, isPersonalView, userRole }) => {
       trend: "up",
       trendValue: 12
     },
-    {
+    userRole !== "team_member" && {
       title: "Privileged Accounts",
       value: metrics.privileged_accounts,
       subtitle: "Currently active",
@@ -90,7 +90,7 @@ const MetricsGrid = ({ metrics, isPersonalView, userRole }) => {
       trend: "down",
       trendValue: 3
     },
-    {
+    userRole !== "team_member" && {
       title: "Flagged Accounts",
       value: metrics.flagged_accounts,
       subtitle: "This week",
@@ -108,7 +108,7 @@ const MetricsGrid = ({ metrics, isPersonalView, userRole }) => {
       trend: "down",
       trendValue: 15
     }
-  ];
+  ].filter(Boolean);
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="metrics-grid">

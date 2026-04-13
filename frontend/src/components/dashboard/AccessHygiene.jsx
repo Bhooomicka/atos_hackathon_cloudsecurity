@@ -6,16 +6,18 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import PermissionModal from "./PermissionModal";
 
-const AccessHygiene = ({ data, onRefresh }) => {
+const AccessHygiene = ({ data, onRefresh, userRole }) => {
   const [selectedItem, setSelectedItem] = useState(null);
   const [permissionModalOpen, setPermissionModalOpen] = useState(false);
 
   if (!data) return null;
 
-  const totalIssues = data.overprivileged_accounts + data.stale_accounts + data.policy_violations;
+  const canViewOverprivileged = userRole !== "team_member";
+
+  const totalIssues = (canViewOverprivileged ? data.overprivileged_accounts : 0) + data.stale_accounts + data.policy_violations;
 
   const hygieneItems = [
-    {
+    canViewOverprivileged && {
       icon: UserX,
       label: "Overprivileged Accounts",
       description: "Accounts with more access than needed",
@@ -45,7 +47,11 @@ const AccessHygiene = ({ data, onRefresh }) => {
       type: "policy_violation",
       percentage: Math.round((data.policy_violations / Math.max(1, totalIssues)) * 100)
     }
-  ];
+  ].filter(Boolean);
+
+  const visibleItems = (data.items || []).filter(
+    (item) => canViewOverprivileged || item.type !== "overprivileged"
+  );
 
   const handleItemClick = (item) => {
     if (item.type !== "overprivileged") return;
@@ -134,12 +140,12 @@ const AccessHygiene = ({ data, onRefresh }) => {
           ))}
 
           {/* Detailed Items List */}
-          {data.items && data.items.length > 0 && (
+          {visibleItems.length > 0 && (
             <div className="pt-4 border-t border-border">
               <p className="text-sm font-medium mb-3">Issues Requiring Action</p>
               <ScrollArea className="h-[120px]">
                 <div className="space-y-2">
-                  {data.items.map((item) => (
+                  {visibleItems.map((item) => (
                     <div
                       key={item.id}
                       className="flex items-center justify-between p-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer"
