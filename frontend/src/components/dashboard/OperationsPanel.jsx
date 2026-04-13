@@ -76,13 +76,12 @@ const OperationsPanel = () => {
   useEffect(() => {
     if (user?.role === "admin" || user?.role === "team_lead") {
       fetchConfig();
+    } else {
+      setConfig(loadLocalConfig());
+      setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, user?.role]);
-
-  if (user?.role !== "admin" && user?.role !== "team_lead") {
-    return null;
-  }
 
   const updateWindow = (index, field, value) => {
     setConfig((current) => ({
@@ -145,6 +144,11 @@ const OperationsPanel = () => {
         <CardDescription>
           Control safe mode and maintenance windows for queued permission changes.
         </CardDescription>
+        {!canEdit && (
+          <p className="text-xs text-muted-foreground">
+            View only. Sales-safe controls can be changed by admins only.
+          </p>
+        )}
       </CardHeader>
       <CardContent className="space-y-5" data-testid="operations-panel">
         <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background/40 p-4">
