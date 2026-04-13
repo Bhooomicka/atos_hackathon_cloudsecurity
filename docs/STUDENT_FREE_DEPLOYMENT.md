@@ -74,6 +74,11 @@ Use the `frontend` directory as project root in Vercel.
 
 1. `REACT_APP_BACKEND_URL` = `https://<service-name>.onrender.com`
 
+### Optional Mock Login Fallback (Recommended for demo-only frontend)
+
+1. `REACT_APP_ENABLE_DEMO_MODE` = `true`
+2. Redeploy frontend after updating env vars.
+
 Then deploy. The included [`frontend/vercel.json`](/Users/bhooomickadg/Downloads/atos_frontend-main/frontend/vercel.json) handles SPA routing fallback.
 
 ## Step 4: End-to-End Check

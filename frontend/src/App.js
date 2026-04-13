@@ -13,7 +13,12 @@ import CompliancePage from "@/pages/CompliancePage";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
-const DEMO_MODE_ENABLED = process.env.REACT_APP_ENABLE_DEMO_MODE === "true";
+const isTruthyEnv = (value) => {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+};
+
+const DEMO_MODE_ENABLED = isTruthyEnv(process.env.REACT_APP_ENABLE_DEMO_MODE);
 
 // Auth Context
 const AuthContext = createContext(null);

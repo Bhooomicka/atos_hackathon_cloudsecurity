@@ -1,4 +1,12 @@
 {
+  "build": {
+    "env": {
+      "REACT_APP_ENABLE_DEMO_MODE": "true"
+    }
+  },
+  "env": {
+    "REACT_APP_ENABLE_DEMO_MODE": "true"
+  },
   "routes": [
     {
       "handle": "filesystem"
